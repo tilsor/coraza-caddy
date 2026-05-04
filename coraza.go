@@ -23,6 +23,8 @@ import (
 	"github.com/jcchavezs/mergefs"
 	mergefsio "github.com/jcchavezs/mergefs/io"
 	"go.uber.org/zap"
+
+	waceWAF "github.com/tilsor/wace-coraza/wace_waf"
 )
 
 // wafPool is a process-global pool that allows WAF instances to be shared
@@ -99,7 +101,7 @@ func (m *corazaModule) Provision(ctx caddy.Context) error {
 
 // buildWAF creates a new coraza.WAF from the module's configuration.
 func (m *corazaModule) buildWAF() (coraza.WAF, error) {
-	config := coraza.NewWAFConfig().
+	config := waceWAF.NewWAFConfig().
 		WithErrorCallback(newErrorCb(m.logger)).
 		WithDebugLogger(newLogger(m.logger))
 
@@ -132,7 +134,7 @@ func (m *corazaModule) buildWAF() (coraza.WAF, error) {
 		}
 	}
 
-	return coraza.NewWAF(config)
+	return waceWAF.NewWAF(config)
 }
 
 // computePoolKey returns a deterministic key derived from the configuration

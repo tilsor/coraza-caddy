@@ -18,7 +18,7 @@ import (
 )
 
 var addLicenseVersion = "v1.2.0" // https://github.com/google/addlicense
-var golangCILintVer = "v2.10.1"   // https://github.com/golangci/golangci-lint/releases
+var golangCILintVer = "v2.10.1"  // https://github.com/golangci/golangci-lint/releases
 var gosImportsVer = "v0.3.8"     // https://github.com/rinchsan/gosimports/releases/tag/v0.1.5
 
 var errRunGoModTidy = errors.New("go.mod/sum not formatted, commit changes")
@@ -43,7 +43,7 @@ func Format() error {
 	return sh.RunV("go", "run", fmt.Sprintf("github.com/rinchsan/gosimports/cmd/gosimports@%s", gosImportsVer),
 		"-w",
 		"-local",
-		"github.com/corazawaf/coraza-caddy/v2",
+		"github.com/tilsor/coraza-caddy/v2",
 		".")
 }
 
@@ -204,7 +204,7 @@ func buildCaddy(goos string) error {
 	if os.Getenv("CADDY_VERSION") != "" {
 		buildArgs = append(buildArgs, os.Getenv("CADDY_VERSION"))
 	}
-	buildArgs = append(buildArgs, "--with", "github.com/corazawaf/coraza-caddy/v2=.",
+	buildArgs = append(buildArgs, "--with", "github.com/tilsor/coraza-caddy/v2=.",
 		"--output", buildDir)
 
 	return sh.RunWithV(env, "xcaddy", buildArgs...)
