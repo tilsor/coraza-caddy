@@ -9,7 +9,7 @@ require (
 	github.com/jcchavezs/mergefs v0.1.1
 	github.com/magefile/mage v1.17.2
 	github.com/stretchr/testify v1.11.1
-	github.com/tilsor/wace-coraza v1.0.1
+	github.com/tilsor/wace-coraza v1.0.2
 	go.uber.org/zap v1.27.1
 )
 
@@ -132,7 +132,7 @@ require (
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tilsor/ModSecIntl_logging v1.0.1 // indirect
-	github.com/tilsor/ModSecIntl_wace_lib v1.0.1 // indirect
+	github.com/tilsor/ModSecIntl_wace_lib v1.0.2 // indirect
 	github.com/urfave/cli v1.22.17 // indirect
 	github.com/valllabh/ocsf-schema-golang v1.0.3 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
