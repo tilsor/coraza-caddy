@@ -17,10 +17,11 @@ import (
 func processRequest(tx types.Transaction, req *http.Request) (*types.Interruption, error) {
 
 	client, cport := getClientAddress(req)
+	serverName := parseServerName(req.Host)
 
 	var in *types.Interruption
 	// There is no socket access in the request object, so we neither know the server client nor port.
-	tx.ProcessConnection(client, cport, "", 0)
+	tx.ProcessConnection(client, cport, serverName, 0)
 	tx.ProcessURI(req.URL.String(), req.Method, req.Proto)
 	for k, vr := range req.Header {
 		for _, v := range vr {
@@ -33,7 +34,7 @@ func processRequest(tx types.Transaction, req *http.Request) (*types.Interruptio
 	if req.Host != "" {
 		tx.AddRequestHeader("Host", req.Host)
 		// This connector relies on the host header (now host field) to populate ServerName
-		tx.SetServerName(parseServerName(req.Host))
+		tx.SetServerName(serverName)
 	}
 
 	// Transfer-Encoding header is removed by go/http
