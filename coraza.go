@@ -23,6 +23,7 @@ import (
 	"github.com/jcchavezs/mergefs"
 	mergefsio "github.com/jcchavezs/mergefs/io"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	waceWAF "github.com/tilsor/wace-coraza/wace_waf"
 )
@@ -282,25 +283,96 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 	return m, err
 }
 
+type errorLogJSON struct {
+	File       string   `json:"file"`
+	Line       int      `json:"line"`
+	ID         int      `json:"rule_id"`
+	Revision   string   `json:"rev"`
+	Msg        string   `json:"msg"`
+	Data       string   `json:"data"`
+	SeverityID int      `json:"sev_id"`
+	Severity   string   `json:"sev"`
+	Version    string   `json:"ver"`
+	Maturity   int      `json:"mat"`
+	Accuracy   int      `json:"acc"`
+	Client     string   `json:"client"`
+	Disruptive bool     `json:"disruptive"`
+	Tags       []string `json:"tags"`
+	Server     string   `json:"server"`
+	URI        string   `json:"uri"`
+	UniqueID   string   `json:"unique_id"`
+}
+
+// MarshalLogObject lets zap encode errorLogJSON's fields directly onto the
+// log line (via zap.Inline) instead of as an escaped JSON string message.
+func (e errorLogJSON) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("file", e.File)
+	enc.AddInt("line", e.Line)
+	enc.AddInt("rule_id", e.ID)
+	enc.AddString("rev", e.Revision)
+	enc.AddString("msg", e.Msg)
+	enc.AddString("data", e.Data)
+	enc.AddInt("sev_id", e.SeverityID)
+	enc.AddString("sev", e.Severity)
+	enc.AddString("ver", e.Version)
+	enc.AddInt("mat", e.Maturity)
+	enc.AddInt("acc", e.Accuracy)
+	enc.AddString("client", e.Client)
+	enc.AddBool("disruptive", e.Disruptive)
+	if err := enc.AddArray("tags", zapcore.ArrayMarshalerFunc(func(aenc zapcore.ArrayEncoder) error {
+		for _, t := range e.Tags {
+			aenc.AppendString(t)
+		}
+		return nil
+	})); err != nil {
+		return err
+	}
+	enc.AddString("server", e.Server)
+	enc.AddString("uri", e.URI)
+	enc.AddString("unique_id", e.UniqueID)
+	return nil
+}
+
+func buildErrorLog(mr types.MatchedRule) errorLogJSON {
+	r := mr.Rule()
+	return errorLogJSON{
+		File:       r.File(),
+		Line:       r.Line(),
+		ID:         r.ID(),
+		Revision:   r.Revision(),
+		Msg:        mr.Message(),
+		Data:       mr.Data(),
+		Severity:   r.Severity().String(),
+		SeverityID: r.Severity().Int(),
+		Version:    r.Version(),
+		Maturity:   r.Maturity(),
+		Accuracy:   r.Accuracy(),
+		Client:     mr.ClientIPAddress(),
+		Server:     mr.ServerIPAddress(),
+		Disruptive: mr.Disruptive(),
+		Tags:       r.Tags(),
+		URI:        mr.URI(),
+		UniqueID:   mr.TransactionID(),
+	}
+}
+
 func newErrorCb(logger *zap.Logger) func(types.MatchedRule) {
 	return func(mr types.MatchedRule) {
-		logMsg := mr.ErrorLog()
+		field := zap.Inline(buildErrorLog(mr))
 		switch mr.Rule().Severity() {
 		case types.RuleSeverityEmergency,
 			types.RuleSeverityAlert,
 			types.RuleSeverityCritical,
 			types.RuleSeverityError:
-			logger.Error(logMsg)
+			logger.Error("WAF rule violation detected", field)
 		case types.RuleSeverityWarning:
-			logger.Warn(logMsg)
-		case types.RuleSeverityNotice:
-			logger.Info(logMsg)
-		case types.RuleSeverityInfo:
-			logger.Info(logMsg)
+			logger.Warn("WAF rule violation detected", field)
+		case types.RuleSeverityNotice, types.RuleSeverityInfo:
+			logger.Info("WAF rule violation detected", field)
 		case types.RuleSeverityDebug:
-			logger.Debug(logMsg)
+			logger.Debug("WAF rule violation detected", field)
 		default:
-			logger.Warn(logMsg)
+			logger.Warn("WAF rule violation detected", field)
 		}
 	}
 }
