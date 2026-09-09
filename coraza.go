@@ -23,6 +23,7 @@ import (
 	"github.com/jcchavezs/mergefs"
 	mergefsio "github.com/jcchavezs/mergefs/io"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	waceWAF "github.com/tilsor/wace-coraza/wace_waf"
 )
@@ -282,25 +283,93 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 	return m, err
 }
 
+type errorLogJSON struct {
+	File       string   `json:"file"`
+	Line       int      `json:"line"`
+	ID         int      `json:"rule_id"`
+	Revision   string   `json:"revision"`
+	Message    string   `json:"message"`
+	Data       string   `json:"data"`
+	Severity   string   `json:"severity"`
+	Version    string   `json:"version"`
+	Maturity   int      `json:"maturity"`
+	Accuracy   int      `json:"accuracy"`
+	RemoteIP   string   `json:"remote_ip"`
+	Disruptive bool     `json:"disruptive"`
+	Tags       []string `json:"tags"`
+	Host       string   `json:"host"`
+	URI        string   `json:"uri"`
+	RequestID  string   `json:"request_id"`
+}
+
+// MarshalLogObject lets zap encode errorLogJSON's fields directly onto the
+// log line (via zap.Inline) instead of as an escaped JSON string message.
+func (e errorLogJSON) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddString("file", e.File)
+	enc.AddInt("line", e.Line)
+	enc.AddInt("rule_id", e.ID)
+	enc.AddString("revision", e.Revision)
+	enc.AddString("data", e.Data)
+	enc.AddString("severity", e.Severity)
+	enc.AddString("version", e.Version)
+	enc.AddInt("maturity", e.Maturity)
+	enc.AddInt("accuracy", e.Accuracy)
+	enc.AddString("remote_ip", e.RemoteIP)
+	enc.AddBool("disruptive", e.Disruptive)
+	if err := enc.AddArray("tags", zapcore.ArrayMarshalerFunc(func(aenc zapcore.ArrayEncoder) error {
+		for _, t := range e.Tags {
+			aenc.AppendString(t)
+		}
+		return nil
+	})); err != nil {
+		return err
+	}
+	enc.AddString("host", e.Host)
+	enc.AddString("uri", e.URI)
+	enc.AddString("request_id", e.RequestID)
+	return nil
+}
+
+func buildErrorLog(mr types.MatchedRule) errorLogJSON {
+	r := mr.Rule()
+	return errorLogJSON{
+		File:       r.File(),
+		Line:       r.Line(),
+		ID:         r.ID(),
+		Revision:   r.Revision(),
+		Message:    mr.Message(),
+		Data:       mr.Data(),
+		Severity:   r.Severity().String(),
+		Version:    r.Version(),
+		Maturity:   r.Maturity(),
+		Accuracy:   r.Accuracy(),
+		RemoteIP:   mr.ClientIPAddress(),
+		Host:       mr.ServerIPAddress(),
+		Disruptive: mr.Disruptive(),
+		Tags:       r.Tags(),
+		URI:        mr.URI(),
+		RequestID:  mr.TransactionID(),
+	}
+}
+
 func newErrorCb(logger *zap.Logger) func(types.MatchedRule) {
 	return func(mr types.MatchedRule) {
-		logMsg := mr.ErrorLog()
+		eLog := buildErrorLog(mr)
+		field := zap.Inline(eLog)
 		switch mr.Rule().Severity() {
 		case types.RuleSeverityEmergency,
 			types.RuleSeverityAlert,
 			types.RuleSeverityCritical,
 			types.RuleSeverityError:
-			logger.Error(logMsg)
+			logger.Error(eLog.Message, field)
 		case types.RuleSeverityWarning:
-			logger.Warn(logMsg)
-		case types.RuleSeverityNotice:
-			logger.Info(logMsg)
-		case types.RuleSeverityInfo:
-			logger.Info(logMsg)
+			logger.Warn(eLog.Message, field)
+		case types.RuleSeverityNotice, types.RuleSeverityInfo:
+			logger.Info(eLog.Message, field)
 		case types.RuleSeverityDebug:
-			logger.Debug(logMsg)
+			logger.Debug(eLog.Message, field)
 		default:
-			logger.Warn(logMsg)
+			logger.Warn(eLog.Message, field)
 		}
 	}
 }
