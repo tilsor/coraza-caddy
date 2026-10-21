@@ -94,6 +94,26 @@ go run mage.go test
 
 You can load OWASP CRS by passing the field `load_owasp_crs` and then load the CRS files in the directives as described in the [coraza-coreruleset](https://github.com/corazawaf/coraza-coreruleset) documentation.
 
+The `@`-prefixed paths are **not files on disk**. They are served from a ruleset
+that is compiled into the binary, and `load_owasp_crs` is what makes them
+resolvable. This has two consequences:
+
+- You do not need to download CRS, mount a volume, or ship rule files alongside
+  the binary. `xcaddy build --with github.com/corazawaf/coraza-caddy/v2` already
+  contains them.
+- Do not put a filesystem path in front of an `@` path.
+  `Include /etc/caddy/rules/@owasp_crs/*.conf` will not work; the `@` prefix
+  must start the path.
+
+If you use an `@` path without `load_owasp_crs`, Caddy fails at startup with:
+
+```text
+invalid WAF config from string: failed to readfile:
+  open @coraza.conf-recommended: no such file or directory
+```
+
+Adding `load_owasp_crs` to the `coraza_waf` block resolves it.
+
 ```caddy
 :8080 {
  coraza_waf {
@@ -109,6 +129,102 @@ You can load OWASP CRS by passing the field `load_owasp_crs` and then load the C
  reverse_proxy httpbin:8081
 }
 ```
+
+## Using Coraza plugins
+
+Coraza plugins (extra operators, body processors, GeoIP lookups) are plain Go
+packages that register with Coraza from an `init()`. xcaddy adds a blank import
+for every `--with` package, so a plugin that registers itself and needs no
+configuration can be added straight to the build:
+
+```shell
+xcaddy build --with github.com/corazawaf/coraza-caddy/v2 \
+  --with github.com/some/coraza-plugin
+```
+
+A plugin that needs setup, such as
+[coraza-geoip](https://github.com/corazawaf/coraza-geoip) which must be given a
+database, needs a small package of your own that does the registration. Pass it
+to xcaddy as a local module:
+
+```go
+// register/register.go
+package register
+
+import (
+	_ "embed"
+	"fmt"
+
+	geo "github.com/corazawaf/coraza-geoip"
+)
+
+//go:embed GeoLite2-Country.mmdb
+var db []byte
+
+func init() {
+	if err := geo.RegisterGeoDatabase(db, "country"); err != nil {
+		panic(fmt.Errorf("registering GeoIP database: %w", err))
+	}
+}
+```
+
+```shell
+# register/go.mod declares `module example.com/register` and requires coraza-geoip
+xcaddy build --with github.com/corazawaf/coraza-caddy/v2 \
+  --with example.com/register=./register
+```
+
+## Specifying transaction ID from downstream
+
+You can specify the transaction ID by setting the field `tx_id_req_header` and then pass the value for that request header.
+This is useful when running coraza behind another HTTP server and using the request ID issued by that server.
+
+**Important:** `tx_id_req_header` must be set or overwritten only by a trusted upstream proxy, and that proxy must strip any client-provided value for the same header before it reaches coraza. Otherwise, clients can spoof the transaction ID (and any downstream consumers of it). Configure your front-end proxy to remove client-sent values and inject a trusted request ID instead.
+
+```caddy
+:8080 {
+ coraza_waf {
+  load_owasp_crs
+  directives `
+   Include @coraza.conf-recommended
+   Include @crs-setup.conf.example
+   Include @owasp_crs/*.conf
+   SecRuleEngine On
+  `
+  tx_id_req_header "X-Transaction-ID"
+ }
+
+ reverse_proxy httpbin:8081
+}
+```
+
+
+## Performance
+
+Coraza memoizes the expensive parts of rule compilation (regex and
+aho-corasick pattern compilation) so identical patterns are not recompiled when
+several WAF instances in the same process share the same rules. This matters
+most when one Caddy process serves many sites that each load CRS.
+
+**Memoization is enabled by default.** There is no flag to turn it on. The
+`coraza.no_memoize` build tag exists only to turn it *off*:
+
+| Build tag | Behaviour |
+|---|---|
+| *(none)* | Memoization enabled (default) |
+| `coraza.no_memoize` | Disabled — every pattern compiles fresh |
+
+Older guidance recommends building with `-tags memoize_builders`. That tag was
+how memoization was opted into up to Coraza v3.4.0, when the default was off. It
+was removed in v3.5.0 once memoization became the default. Go ignores unknown
+build tags silently, so passing it today neither fails nor does anything — drop
+it from your build.
+
+The cache is global to the process, so entries are released when a WAF is
+destroyed. This module already does that: the pooled WAF is closed through
+`caddy.Destructor` when the last reference is released, which is what lets
+memory be reclaimed across config reloads.
+
 
 ## Running Example
 
@@ -156,3 +272,19 @@ handle_errors {
 ```
 
 It is possible to use the [templates](https://caddyserver.com/docs/caddyfile/directives/templates) directive to render data dynamically. Take a look at [`example/403.html`](./example/403.html) file.  
+
+When the WAF blocks a request, `{http.error.message}` is
+`interruption triggered by rule <id> (<action>)`. Use it to tell WAF blocks
+apart from application errors with the same status code, or to show the rule
+ID on the error page:
+
+```caddy
+handle_errors {
+ @waf expression `{http.error.message}.startsWith("interruption triggered")`
+ respond @waf "Blocked by the WAF: {http.error.message}" 403
+}
+```
+
+The `WAF rule violation detected` log entry carries the same information in
+the `rule_id` and `action` fields, for blocks raised in the request phases and
+in the response phases alike.

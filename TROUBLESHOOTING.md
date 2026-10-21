@@ -17,3 +17,80 @@ coraza_waf {
 In this scenario, modifying lines in `/path/to/config.conf` will not alter the Caddy configuration itself. Consequently, any added or removed rules will not be recognized by the module.\
 \
 A configuration reload can be enforced by utilizing `caddy reload --force` or, in case you are using APIs, by specifying the `Cache-Control: must-revalidate` header. This forces the reload process regardless of whether any modifications were made. Further details can be found in the official Caddy documentation [here](https://caddyserver.com/docs/api#post-load).
+
+### Memory growth during HTTP/2 HPACK bomb tests
+`coraza-caddy` receives requests only after Caddy has parsed HTTP headers. This means HPACK decompression behavior and memory usage limits are handled at the Caddy HTTP server layer, not inside the Coraza middleware.
+
+If you need to harden against HPACK bomb-style traffic, configure limits on the Caddy server, for example:
+
+```caddy
+{
+	servers {
+		max_header_size 16KiB
+	}
+}
+```
+
+Note the Caddyfile option is `max_header_size`; `max_header_bytes` is the corresponding key in Caddy's JSON config, and using that name in a Caddyfile is a parse error.
+
+Use a value appropriate for your application. Lower values improve resilience to oversized/expanded headers, but may block legitimate requests with large cookies or header sets.
+
+### `open @coraza.conf-recommended: no such file or directory`
+The `@`-prefixed CRS paths are served from a ruleset compiled into the binary, not read from disk, and the `load_owasp_crs` field is what makes them resolvable. Without it Caddy treats `@coraza.conf-recommended` as a literal filename and fails at startup:
+
+```text
+invalid WAF config from string: failed to readfile:
+  open @coraza.conf-recommended: no such file or directory
+```
+
+Add `load_owasp_crs` to the `coraza_waf` block:
+
+```caddy
+coraza_waf {
+	load_owasp_crs
+	directives `
+	Include @coraza.conf-recommended
+	Include @crs-setup.conf.example
+	Include @owasp_crs/*.conf
+	SecRuleEngine On
+	`
+}
+```
+
+The same error appears if an `@` path is prefixed with a directory, as in `Include /etc/caddy/rules/@owasp_crs/*.conf`. The `@` must start the path.
+
+### `SecDefaultAction already defined for this phase`
+Since v2.7.0 the embedded CRS is v4.30.0, whose `@crs-setup.conf.example` declares `SecDefaultAction` for phases 1 to 5. Coraza allows one per phase, so a config that sets its own after the include fails at startup:
+
+```text
+invalid WAF config from string: failed to parse string: failed to compile the directive "secaction":
+  SecDefaultAction already defined for this phase: phase:3,log,auditlog,pass
+```
+
+If the lines were added so that response-phase (3 and 4) blocks get logged, delete them: the setup file now provides them. To keep custom defaults, include `@crs-setup.conf.example-nodefaultact` instead, which is the same file with its `SecDefaultAction` lines commented out:
+
+```caddy
+Include @coraza.conf-recommended
+Include @crs-setup.conf.example-nodefaultact
+SecDefaultAction "phase:1,log,auditlog,pass"
+SecDefaultAction "phase:2,log,auditlog,pass"
+SecDefaultAction "phase:3,log,auditlog,pass"
+SecDefaultAction "phase:4,log,auditlog,pass"
+SecDefaultAction "phase:5,log,auditlog,pass"
+Include @owasp_crs/*.conf
+```
+
+### Debug log file is created but stays empty
+`SecDebugLogLevel` on its own is not enough. Coraza's debug output is routed through Caddy's logger, and Coraza's debug and trace levels are both emitted at Caddy's `DEBUG` level. Caddy logs at `INFO` by default, so the entries are filtered out before they reach the file.
+
+Raise Caddy's log level as well:
+
+```caddy
+{
+	log {
+		level DEBUG
+	}
+}
+```
+
+With `SecDebugLogLevel 9` and Caddy at its default level the file stays at 0 bytes; with Caddy at `DEBUG` it fills as expected. The audit log is written by Coraza directly and is unaffected, which is why it can have contents while the debug log looks broken.

@@ -5,7 +5,6 @@ package coraza
 
 import (
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +16,8 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	coreruleset "github.com/corazawaf/coraza-coreruleset/v4"
+	corazaconf "github.com/corazawaf/coraza-coreruleset/coraza/v3"
+	coreruleset "github.com/corazawaf/coraza-coreruleset/crs/v4"
 	"github.com/corazawaf/coraza/v3"
 	"github.com/corazawaf/coraza/v3/types"
 	"github.com/jcchavezs/mergefs"
@@ -60,9 +60,11 @@ func (p *pooledWAF) Destruct() error {
 // corazaModule is a Web Application Firewall implementation for Caddy.
 type corazaModule struct {
 	// deprecated
-	Include      []string `json:"include"`
-	Directives   string   `json:"directives"`
-	LoadOWASPCRS bool     `json:"load_owasp_crs"`
+	Include []string `json:"include"`
+
+	Directives    string `json:"directives"`
+	LoadOWASPCRS  bool   `json:"load_owasp_crs"`
+	TxIDReqHeader string `json:"tx_id_req_header"`
 
 	logger  *zap.Logger
 	waf     coraza.WAF
@@ -107,7 +109,7 @@ func (m *corazaModule) buildWAF() (coraza.WAF, error) {
 		WithDebugLogger(newLogger(m.logger))
 
 	if m.LoadOWASPCRS {
-		config = config.WithRootFS(mergefs.Merge(coreruleset.FS, mergefsio.OSFS))
+		config = config.WithRootFS(mergefs.Merge(coreruleset.FS, corazaconf.FS, mergefsio.OSFS))
 	}
 
 	if m.Directives != "" {
@@ -171,17 +173,50 @@ func (m *corazaModule) Cleanup() error {
 	return err
 }
 
-var errInterruptionTriggered = errors.New("interruption triggered")
+// interruptionError describes a WAF interruption. Caddy exposes the message as
+// {http.error.message}, so error handlers can tell WAF blocks apart from
+// application errors and see which rule fired.
+func interruptionError(it *types.Interruption) error {
+	return fmt.Errorf("interruption triggered by rule %d (%s)", it.RuleID, it.Action)
+}
+
+// isValidTxID reports whether s is acceptable as a transaction ID supplied by
+// an upstream proxy. Coraza's concurrent audit log writer interpolates the
+// transaction ID into a file path, so anything outside a conservative
+// alphanumeric set is rejected to keep a spoofed header from escaping the
+// audit log directory or forging log lines.
+func isValidTxID(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (m corazaModule) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	repl, ok := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
-	if !ok {
-		return next.ServeHTTP(w, r)
+	// Default to Caddy's request UUID so WAF logs correlate with access logs.
+	var id string
+	if repl, ok := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer); ok {
+		id, _ = repl.GetString("http.request.uuid")
+	}
+	if header := strings.TrimSpace(m.TxIDReqHeader); header != "" {
+		if candidate := strings.TrimSpace(r.Header.Get(header)); isValidTxID(candidate) {
+			id = candidate
+		}
+	}
+	if id == "" {
+		id = randomString(16)
 	}
 
-	id, _ := repl.GetString("http.request.uuid")
-	// id := randomString(16)
 	tx := m.waf.NewTransactionWithID(id)
 	defer func() {
 		tx.ProcessLogging()
@@ -197,8 +232,8 @@ func (m corazaModule) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 		return next.ServeHTTP(w, r)
 	}
 
-	// repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
-	// repl.Set("http.transaction_id", id)
+	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
+	repl.Set("http.transaction_id", id)
 
 	server := r.Context().Value(caddyhttp.ServerCtxKey).(*caddyhttp.Server)
 	caddyhttp.PrepareRequest(r, repl, w, server)
@@ -213,27 +248,40 @@ func (m corazaModule) ServeHTTP(w http.ResponseWriter, r *http.Request, next cad
 			Err:        err,
 		}
 	} else if it != nil {
-		m.logger.Error("WAF rule violation detected",
-			zap.String("hostname", r.Host),
-			zap.String("uri", r.RequestURI),
-			zap.String("client_ip", r.RemoteAddr),
-			zap.String("unique_id", tx.ID()),
-		)
+		m.logViolation(r, tx, it)
 		return caddyhttp.HandlerError{
 			StatusCode: obtainStatusCodeFromInterruptionOrDefault(it, http.StatusOK),
 			ID:         tx.ID(),
-			Err:        errInterruptionTriggered,
+			Err:        interruptionError(it),
 		}
 	}
 
 	ww, processResponse := wrap(w, r, tx)
 
 	// We continue with the other middlewares by catching the response
-	if err := next.ServeHTTP(ww, r); err != nil {
-		return err
+	err := next.ServeHTTP(ww, r)
+	if err == nil {
+		err = processResponse(tx, r)
 	}
+	// The request phases did not interrupt, so any interruption now comes from
+	// the response phases (3/4). The interceptor already sent the status code;
+	// here we only make sure it is logged like a request-phase block.
+	if it := tx.Interruption(); it != nil {
+		m.logViolation(r, tx, it)
+	}
+	return err
+}
 
-	return processResponse(tx, r)
+func (m corazaModule) logViolation(r *http.Request, tx types.Transaction, it *types.Interruption) {
+	client, _ := getClientAddress(r)
+	m.logger.Error("WAF rule violation detected",
+		zap.String("hostname", r.Host),
+		zap.String("uri", r.RequestURI),
+		zap.String("client_ip", client),
+		zap.String("unique_id", tx.ID()),
+		zap.Int("rule_id", it.RuleID),
+		zap.String("action", it.Action),
+	)
 }
 
 // Unmarshal Caddyfile implements caddyfile.Unmarshaler.
@@ -268,6 +316,19 @@ func (m *corazaModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			case "directives":
 				m.Directives = value
 			}
+		case "tx_id_req_header":
+			var value string
+			if !d.Args(&value) {
+				// not enough args
+				return d.ArgErr()
+			}
+
+			if d.NextArg() {
+				// too many args
+				return d.ArgErr()
+			}
+
+			m.TxIDReqHeader = value
 		default:
 			return d.Errf("invalid key %q", key)
 		}
