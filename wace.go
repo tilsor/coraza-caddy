@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/corazawaf/coraza/v3"
 	"github.com/corazawaf/coraza/v3/types"
 	"go.uber.org/zap"
+	"go.uber.org/zap/exp/zapslog"
 	"go.uber.org/zap/zapcore"
 	"go.yaml.in/yaml/v3"
 
@@ -35,10 +37,16 @@ type WaceAppConfig struct {
 	Blocking      bool     `json:"blocking,omitempty"`
 }
 
+// waceConfigVersion identifies the WACE general config WAFs are built with. It
+// is a variable so tests can simulate a reload that changes it.
+var waceConfigVersion = waceWAF.ConfigVersion
+
 // provisionWace loads the WACE general config and resolves the app config. It
-// has to run before computePoolKey, which hashes the resolved app config.
+// has to run before computePoolKey, which hashes both.
 func (m *corazaModule) provisionWace() error {
-	if err := waceWAF.Reload(nil); err != nil {
+	// WACE and its core log through slog, so they are bridged to Caddy's logger
+	// to follow its configured format, level and outputs.
+	if err := waceWAF.Reload(slog.New(zapslog.NewHandler(m.logger.Core()))); err != nil {
 		return err
 	}
 
@@ -128,6 +136,10 @@ func newWaceWAF(config coraza.WAFConfig) (coraza.WAF, error) {
 
 // writeWacePoolKey adds the WACE options to the WAF pool key.
 func (m *corazaModule) writeWacePoolKey(h io.Writer) {
+	// A WAF keeps the WACE general config it was created with, so a reload that
+	// changes it must not reuse a pooled WAF.
+	fmt.Fprintf(h, "wace-general:%s\x00", waceConfigVersion())
+
 	// Hashing the resolved content rather than the file path means an edit to
 	// wace_config_file also yields a fresh WAF on reload.
 	if m.waceAppConfig != nil {

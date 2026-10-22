@@ -275,3 +275,14 @@ func TestComputePoolKeyWace(t *testing.T) {
 	require.NotEqual(t, withAppConfig("waf_only").computePoolKey(), plain.computePoolKey())
 	require.NotEqual(t, withExceptions.computePoolKey(), plain.computePoolKey())
 }
+
+func TestComputePoolKeyWaceConfigVersion(t *testing.T) {
+	m := &corazaModule{Directives: "SecRuleEngine On"}
+	before := m.computePoolKey()
+
+	original := waceConfigVersion
+	t.Cleanup(func() { waceConfigVersion = original })
+	waceConfigVersion = func() string { return original() + "-reloaded" }
+
+	require.NotEqual(t, before, m.computePoolKey())
+}

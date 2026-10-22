@@ -12,6 +12,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/tilsor/wace-coraza v1.0.3
 	go.uber.org/zap v1.28.0
+	go.uber.org/zap/exp v0.3.0
 	go.yaml.in/yaml/v3 v3.0.5
 )
 
@@ -170,7 +171,6 @@ require (
 	go.step.sm/crypto v0.81.0 // indirect
 	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap/exp v0.3.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260213171211-a408498e5541 // indirect
