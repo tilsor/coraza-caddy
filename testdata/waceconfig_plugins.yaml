@@ -1,0 +1,18 @@
+# WACE configuration with real plugins, for tests that need WACE to load them.
+# The plugins are built by `mage plugins` (`mage testRace` for -race). It has no
+# crs_version, so WACE injects no CRS directives and never calls the decision
+# plugin. Paths are relative to the package directory, where tests run.
+
+model_plugins:
+  - id: "param"
+    plugin_type: RequestHeaders
+    path: "testdata/plugins/param.so"
+    params:
+      # probability of attack returned for every request
+      result: "0.0"
+
+decision_plugins:
+  - id: "waf_only"
+    path: "testdata/plugins/waf_only.so"
+
+default_decision: "waf_only"
