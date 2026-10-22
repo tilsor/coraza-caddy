@@ -20,23 +20,22 @@ jobs:
   test:
     strategy:
       matrix:
-        go-version: [1.26.x]
         os: [ubuntu-latest]
         xcaddy-version: [v0.4.5]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     steps:
-      - name: Install Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
-        with:
-          go-version: ${{ matrix.go-version }}
-
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           lfs: true
           fetch-depth: 0 #for better blame info
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
 
       - name: Tests and coverage
         run: go run mage.go coverage
@@ -61,5 +60,5 @@ jobs:
       # - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       #   if: success() || failure()
       #   with:
-      #     name: ftw-caddy-logs-${{ matrix.go-version }}
+      #     name: ftw-caddy-logs
       #     path: build/ftw-caddy.log
