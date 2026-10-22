@@ -3,10 +3,10 @@ name: Lint (pre-commit)
 on:
   pull_request:
     branches:
-      - main
+      - wace-coraza
   push:
     branches:
-      - "main"
+      - "wace-coraza"
 
 permissions: {}
 

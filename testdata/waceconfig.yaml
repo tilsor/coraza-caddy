@@ -1,0 +1,4 @@
+# Minimal WACE configuration for the test suite: no model or decision plugins
+# and no crs_version, so the WACE WAF behaves like plain Coraza.
+logpath: "/dev/stderr"
+loglevel: "ERROR"

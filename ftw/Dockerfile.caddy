@@ -1,6 +1,8 @@
 FROM debian
 
 COPY ftw/Caddyfile /etc/caddy/Caddyfile
+COPY testdata/waceconfig.yaml /etc/caddy/waceconfig.yaml
+ENV WACE_CONFIG_FILEPATH=/etc/caddy/waceconfig.yaml
 
 COPY build/caddy-linux /usr/bin/caddy
 
