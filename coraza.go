@@ -23,7 +23,6 @@ import (
 	"github.com/jcchavezs/mergefs"
 	mergefsio "github.com/jcchavezs/mergefs/io"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 
 	waceWAF "github.com/tilsor/wace-coraza/wace_waf"
 )
@@ -66,9 +65,17 @@ type corazaModule struct {
 	LoadOWASPCRS  bool   `json:"load_owasp_crs"`
 	TxIDReqHeader string `json:"tx_id_req_header"`
 
+	// WACE options, see wace.go
+	WaceAppConfig      *WaceAppConfig `json:"wace_config,omitempty"`
+	WaceAppConfigFile  string         `json:"wace_config_file,omitempty"`
+	WaceExceptionsFile string         `json:"wace_exceptions_file,omitempty"`
+
 	logger  *zap.Logger
 	waf     coraza.WAF
 	poolKey string
+
+	// resolved from either WaceAppConfig or WaceAppConfigFile during Provision
+	waceAppConfig *waceWAF.WaceAppConfigFileData
 }
 
 // CaddyModule returns the Caddy module information.
@@ -82,6 +89,9 @@ func (corazaModule) CaddyModule() caddy.ModuleInfo {
 // Provision implements caddy.Provisioner.
 func (m *corazaModule) Provision(ctx caddy.Context) error {
 	m.logger = ctx.Logger(m)
+	if err := m.provisionWace(); err != nil {
+		return err
+	}
 	m.poolKey = m.computePoolKey()
 
 	val, loaded, err := wafPool.LoadOrNew(m.poolKey, func() (caddy.Destructor, error) {
@@ -104,7 +114,7 @@ func (m *corazaModule) Provision(ctx caddy.Context) error {
 
 // buildWAF creates a new coraza.WAF from the module's configuration.
 func (m *corazaModule) buildWAF() (coraza.WAF, error) {
-	config := waceWAF.NewWAFConfig().
+	config := m.newWaceWAFConfig().
 		WithErrorCallback(newErrorCb(m.logger)).
 		WithDebugLogger(newLogger(m.logger))
 
@@ -137,7 +147,7 @@ func (m *corazaModule) buildWAF() (coraza.WAF, error) {
 		}
 	}
 
-	return waceWAF.NewWAF(config)
+	return newWaceWAF(config)
 }
 
 // computePoolKey returns a deterministic key derived from the configuration
@@ -159,6 +169,7 @@ func (m *corazaModule) computePoolKey() string {
 	if m.LoadOWASPCRS {
 		h.Write([]byte("crs"))
 	}
+	m.writeWacePoolKey(h)
 	return fmt.Sprintf("coraza-waf-%x", h.Sum(nil))
 }
 
@@ -203,18 +214,11 @@ func isValidTxID(s string) bool {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (m corazaModule) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	// Default to Caddy's request UUID so WAF logs correlate with access logs.
-	var id string
-	if repl, ok := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer); ok {
-		id, _ = repl.GetString("http.request.uuid")
-	}
+	id := defaultTxID(r)
 	if header := strings.TrimSpace(m.TxIDReqHeader); header != "" {
 		if candidate := strings.TrimSpace(r.Header.Get(header)); isValidTxID(candidate) {
 			id = candidate
 		}
-	}
-	if id == "" {
-		id = randomString(16)
 	}
 
 	tx := m.waf.NewTransactionWithID(id)
@@ -330,7 +334,9 @@ func (m *corazaModule) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 
 			m.TxIDReqHeader = value
 		default:
-			return d.Errf("invalid key %q", key)
+			if err := m.unmarshalWaceKey(d, key); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -342,97 +348,6 @@ func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error)
 	var m corazaModule
 	err := m.UnmarshalCaddyfile(h.Dispenser)
 	return m, err
-}
-
-type errorLogJSON struct {
-	File       string   `json:"file"`
-	Line       int      `json:"line"`
-	ID         int      `json:"rule_id"`
-	Revision   string   `json:"revision"`
-	Message    string   `json:"message"`
-	Data       string   `json:"data"`
-	Severity   string   `json:"severity"`
-	Version    string   `json:"version"`
-	Maturity   int      `json:"maturity"`
-	Accuracy   int      `json:"accuracy"`
-	RemoteIP   string   `json:"remote_ip"`
-	Disruptive bool     `json:"disruptive"`
-	Tags       []string `json:"tags"`
-	Host       string   `json:"host"`
-	URI        string   `json:"uri"`
-	RequestID  string   `json:"request_id"`
-}
-
-// MarshalLogObject lets zap encode errorLogJSON's fields directly onto the
-// log line (via zap.Inline) instead of as an escaped JSON string message.
-func (e errorLogJSON) MarshalLogObject(enc zapcore.ObjectEncoder) error {
-	enc.AddString("file", e.File)
-	enc.AddInt("line", e.Line)
-	enc.AddInt("rule_id", e.ID)
-	enc.AddString("revision", e.Revision)
-	enc.AddString("data", e.Data)
-	enc.AddString("severity", e.Severity)
-	enc.AddString("version", e.Version)
-	enc.AddInt("maturity", e.Maturity)
-	enc.AddInt("accuracy", e.Accuracy)
-	enc.AddString("remote_ip", e.RemoteIP)
-	enc.AddBool("disruptive", e.Disruptive)
-	if err := enc.AddArray("tags", zapcore.ArrayMarshalerFunc(func(aenc zapcore.ArrayEncoder) error {
-		for _, t := range e.Tags {
-			aenc.AppendString(t)
-		}
-		return nil
-	})); err != nil {
-		return err
-	}
-	enc.AddString("host", e.Host)
-	enc.AddString("uri", e.URI)
-	enc.AddString("request_id", e.RequestID)
-	return nil
-}
-
-func buildErrorLog(mr types.MatchedRule) errorLogJSON {
-	r := mr.Rule()
-	return errorLogJSON{
-		File:       r.File(),
-		Line:       r.Line(),
-		ID:         r.ID(),
-		Revision:   r.Revision(),
-		Message:    mr.Message(),
-		Data:       mr.Data(),
-		Severity:   r.Severity().String(),
-		Version:    r.Version(),
-		Maturity:   r.Maturity(),
-		Accuracy:   r.Accuracy(),
-		RemoteIP:   mr.ClientIPAddress(),
-		Host:       mr.ServerIPAddress(),
-		Disruptive: mr.Disruptive(),
-		Tags:       r.Tags(),
-		URI:        mr.URI(),
-		RequestID:  mr.TransactionID(),
-	}
-}
-
-func newErrorCb(logger *zap.Logger) func(types.MatchedRule) {
-	return func(mr types.MatchedRule) {
-		eLog := buildErrorLog(mr)
-		field := zap.Inline(eLog)
-		switch mr.Rule().Severity() {
-		case types.RuleSeverityEmergency,
-			types.RuleSeverityAlert,
-			types.RuleSeverityCritical,
-			types.RuleSeverityError:
-			logger.Error(eLog.Message, field)
-		case types.RuleSeverityWarning:
-			logger.Warn(eLog.Message, field)
-		case types.RuleSeverityNotice, types.RuleSeverityInfo:
-			logger.Info(eLog.Message, field)
-		case types.RuleSeverityDebug:
-			logger.Debug(eLog.Message, field)
-		default:
-			logger.Warn(eLog.Message, field)
-		}
-	}
 }
 
 // Interface guards
