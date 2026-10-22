@@ -252,7 +252,7 @@ type errorLogJSON struct {
 	Version    string   `json:"version"`
 	Maturity   int      `json:"maturity"`
 	Accuracy   int      `json:"accuracy"`
-	RemoteIP   string   `json:"remote_ip"`
+	ClientIP   string   `json:"client_ip"`
 	Disruptive bool     `json:"disruptive"`
 	Tags       []string `json:"tags"`
 	Host       string   `json:"host"`
@@ -272,7 +272,7 @@ func (e errorLogJSON) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	enc.AddString("version", e.Version)
 	enc.AddInt("maturity", e.Maturity)
 	enc.AddInt("accuracy", e.Accuracy)
-	enc.AddString("remote_ip", e.RemoteIP)
+	enc.AddString("client_ip", e.ClientIP)
 	enc.AddBool("disruptive", e.Disruptive)
 	if err := enc.AddArray("tags", zapcore.ArrayMarshalerFunc(func(aenc zapcore.ArrayEncoder) error {
 		for _, t := range e.Tags {
@@ -301,7 +301,7 @@ func buildErrorLog(mr types.MatchedRule) errorLogJSON {
 		Version:    r.Version(),
 		Maturity:   r.Maturity(),
 		Accuracy:   r.Accuracy(),
-		RemoteIP:   mr.ClientIPAddress(),
+		ClientIP:   mr.ClientIPAddress(),
 		Host:       mr.ServerIPAddress(),
 		Disruptive: mr.Disruptive(),
 		Tags:       r.Tags(),
