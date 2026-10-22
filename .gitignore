@@ -11,3 +11,6 @@ __debug*
 build
 *.out
 coraza-caddy.test
+
+# WACE test plugins, built by mage plugins
+testdata/plugins/*.so

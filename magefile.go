@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/magefile/mage/mg"
 	"github.com/magefile/mage/sh"
@@ -64,12 +65,60 @@ func Lint() error {
 	return nil
 }
 
-// Test runs all tests.
+// testPluginsDir holds the sources of the WACE plugins the tests load.
+var testPluginsDir = filepath.Join("testdata", "plugins")
+
+// Plugins builds the WACE test plugins.
+func Plugins() error {
+	return buildPlugins()
+}
+
+// pluginsRace builds the WACE test plugins with the race detector. A test
+// binary built with -race only loads plugins built with -race, and the
+// other way around.
+func pluginsRace() error {
+	return buildPlugins("-race")
+}
+
+// buildPlugins compiles every .go file under testdata/plugins into a .so
+// plugin. They are built within this module so they share its dependency
+// versions, which Go also requires to load them.
+func buildPlugins(extraFlags ...string) error {
+	sources, err := filepath.Glob(filepath.Join(testPluginsDir, "*.go"))
+	if err != nil {
+		return err
+	}
+	for _, src := range sources {
+		out := strings.TrimSuffix(src, ".go") + ".so"
+		args := []string{"build", "-buildmode=plugin"}
+		args = append(args, extraFlags...)
+		args = append(args, "-o", out, src)
+		fmt.Printf("building %s\n", out)
+		if err := sh.RunV("go", args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Test builds the plugins and runs all tests.
 func Test() error {
+	mg.Deps(Plugins)
 	if err := sh.RunV("go", "test", "./..."); err != nil {
 		return err
 	}
 	return nil
+}
+
+// TestRace builds race-instrumented plugins and runs all tests with the race
+// detector. The plain plugins are rebuilt afterwards, even if the tests fail,
+// so a later plain `go test` still loads them.
+func TestRace() error {
+	if err := pluginsRace(); err != nil {
+		return err
+	}
+	testErr := sh.RunV("go", "test", "-race", "./...")
+	return errors.Join(testErr, Plugins())
 }
 
 // E2e runs e2e tests with a built plugin against the e2e deployment. Requires docker.
@@ -142,12 +191,17 @@ func getModuleVersion(modulePath string) (string, error) {
 	return modVer, nil
 }
 
-// Coverage runs tests with coverage and race detector enabled.
+// Coverage runs tests with coverage and race detector enabled. Like TestRace,
+// it builds race-instrumented plugins and rebuilds the plain ones afterwards.
 func Coverage() error {
 	if err := os.MkdirAll("build", 0755); err != nil {
 		return err
 	}
-	if err := sh.RunV("go", "test", "-race", "-coverprofile=build/coverage.txt", "-covermode=atomic", "-coverpkg=./...", "./..."); err != nil {
+	if err := pluginsRace(); err != nil {
+		return err
+	}
+	testErr := sh.RunV("go", "test", "-race", "-coverprofile=build/coverage.txt", "-covermode=atomic", "-coverpkg=./...", "./...")
+	if err := errors.Join(testErr, Plugins()); err != nil {
 		return err
 	}
 

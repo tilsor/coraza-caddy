@@ -4,15 +4,21 @@
 package coraza
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/exp/zapslog"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	waceWAF "github.com/tilsor/wace-coraza/wace_waf"
 )
@@ -42,6 +48,52 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Exit(0)
+}
+
+// runWithWaceConfig runs the calling top-level test again in a new test
+// process with WACE pointed at config, since the WACE config is process-global,
+// and reports whether the caller is that process.
+func runWithWaceConfig(t *testing.T, config string) bool {
+	t.Helper()
+	configPath, err := filepath.Abs(config)
+	require.NoError(t, err)
+	if os.Getenv(waceWAF.WACE_CONFIG_FILEPATH) == configPath {
+		return true
+	}
+
+	// Not os.Args[0], which the Caddy tests overwrite.
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	cmd := exec.Command(exe, "-test.run=^"+t.Name()+"$", "-test.count=1")
+	cmd.Env = append(os.Environ(), waceWAF.WACE_CONFIG_FILEPATH+"="+configPath)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	return false
+}
+
+func TestWacePlugins(t *testing.T) {
+	if !runWithWaceConfig(t, filepath.Join("testdata", "waceconfig_plugins.yaml")) {
+		return
+	}
+
+	// The first Reload of the process loads the plugins, and a plugin that
+	// fails to open is only logged.
+	core, logs := observer.New(zapcore.DebugLevel)
+	require.NoError(t, waceWAF.Reload(slog.New(zapslog.NewHandler(core))))
+	require.Equal(t, 2, logs.FilterMessage("plugin loaded").Len(),
+		"build the plugins with `mage plugins`, or with `mage testRace` for -race: %v", logs.All())
+
+	ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
+	t.Cleanup(cancel)
+	m := &corazaModule{
+		Directives: "SecRuleEngine On",
+		WaceAppConfig: &WaceAppConfig{
+			ModelIDs:    []string{"param"},
+			DecisionIDs: []string{"waf_only"},
+		},
+	}
+	require.NoError(t, m.Provision(ctx))
+	require.NotNil(t, m.waf)
 }
 
 func TestUnmarshalCaddyfileWace(t *testing.T) {
