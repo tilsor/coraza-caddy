@@ -239,10 +239,16 @@ func TestValidateWaceConfig(t *testing.T) {
 }
 
 func TestResolveWaceAppConfig(t *testing.T) {
-	t.Run("nothing set", func(t *testing.T) {
-		appConfig, err := (&corazaModule{}).resolveWaceAppConfig()
+	t.Run("nothing set with load_owasp_crs", func(t *testing.T) {
+		appConfig, err := (&corazaModule{LoadOWASPCRS: true}).resolveWaceAppConfig()
 		require.NoError(t, err)
 		require.Nil(t, appConfig)
+	})
+
+	t.Run("nothing set without load_owasp_crs disables CRS", func(t *testing.T) {
+		appConfig, err := (&corazaModule{}).resolveWaceAppConfig()
+		require.NoError(t, err)
+		require.Equal(t, &waceWAF.WaceAppConfigFileData{DisableCRS: true}, appConfig)
 	})
 
 	for _, loadCRS := range []bool{true, false} {

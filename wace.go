@@ -77,7 +77,8 @@ func (m *corazaModule) validateWaceConfig() error {
 }
 
 // resolveWaceAppConfig returns the WACE app config from the inline block or
-// from wace_config_file, or nil when neither is set.
+// from wace_config_file. When neither is set, it returns nil with
+// load_owasp_crs, or an app config that only disables CRS without it.
 func (m *corazaModule) resolveWaceAppConfig() (*waceWAF.WaceAppConfigFileData, error) {
 	if w := m.WaceAppConfig; w != nil {
 		return &waceWAF.WaceAppConfigFileData{
@@ -94,7 +95,11 @@ func (m *corazaModule) resolveWaceAppConfig() (*waceWAF.WaceAppConfigFileData, e
 	}
 
 	if m.WaceAppConfigFile == "" {
-		return nil, nil
+		if m.LoadOWASPCRS {
+			return nil, nil
+		}
+
+		return &waceWAF.WaceAppConfigFileData{DisableCRS: true}, nil
 	}
 
 	data, err := os.ReadFile(m.WaceAppConfigFile)
